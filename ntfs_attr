@@ -9,6 +9,9 @@
 # ntfs-3g (pre-installed in most Linux distros)
 # http://www.tuxera.com/community/ntfs-3g-download/
 
+# fatattr
+# (In Debian/Ubuntu: sudo apt-get install fatattr)
+
 # Options (intentionally) not implemented:
 # /S (search and process files of matching pattern in all subdirectories)
 # /D (also process directories when used together with /S)
@@ -99,37 +102,88 @@ attr_no_deref=""
 # Show hex value of 'system.ntfs_attrib_be' when listing attributes.
 attr_show_hex=""
 
+declare -A attributes
+attributes[0]="The following are NTFS or *FAT"
+attributes[r]="- File or Directory is Read-only"
+attributes[h]="- File or Directory is Hidden"
+attributes[s]="- File or directory is used by the system in a nonstandard way.
+Standard defragmentation software will avoid this file.
+Microsoft operating systems will treat any file or directory
+with the system  attribute as hidden, even if the hidden bit
+is not set."
+attributes[d]="! Directory (reserved by system and cannot be set)"
+attributes[a]="- Archive, File has been changed.  This bit is set any time a
+file (but not a directory) is changed, and is typically cleared
+by backup software."
+
+attributes[1]="The following are FAT only"
+attributes[v]="! FAT volume label (This bit cannot be changed)"
+
+attributes[2]="The following are NTFS only"
+attributes[x]="! Device (reserved by system and must not be set)"
+attributes[n]="! Normal (i.e. no other attributes set)"
+attributes[t]="- Temporary" # Changeable in ntfs-3g. Never worked with Windows's attrib.
+attributes[p]="! Sparse file"
+attributes[l]="! Symbolic link / Junction / Mount point / Reparse point"
+attributes[c]="- Compressed (flag changeable with directories only)" # Changeable only in Recovery Console and not in normal Windows.
+attributes[o]="- Offline" # Changeable in Windows 10, version 1703 or later.
+attributes[i]="- Not content indexed (shown as 'N' in Explorer in Windows Vista)" # Changeable in Windows Vista or later.
+attributes[e]="! Encrypted"
+attributes[V]="! Integrity (for ReFS volume only; attribute not shown in Explorer)"
+attributes[X]="! No scrub (for ReFS volume only; attribute not shown in Explorer)"
+attributes[P]='! Pinned (OneDrive "always available files")'
+attributes[U]='! Unpinned (OneDrive "online-only files")'
+attributes[M]="! Recall on data access"
+attributes[B]="! SMR blob / Strictly sequential"
+
+both=rhsda
+onlyfat=v
+onlyntfs=xntplcoieVXPUMB
+
 show_usage () {
-cat << USAGE
+  cat << USAGE
 Usage: $0 [+r|-r] [+h|-h] [+s|-s] [+a|-a] [+c|-c] [+i|-i] [-L] files...
-Display or change attributes on an NTFS filesystem.
+Display or change attributes on an NTFS or *FAT filesystem.
 
   -L, --no-dereference  affect symbolic links instead of referenced files
 
 Attributes: ( ! = unchangeable with this utility )
-  r - Read-only
-  h - Hidden
-  s - System
-  v ! FAT volume label (obsolete in NTFS and must not be set)
-  d ! Directory
-  a - Archive
-  x ! Device (reserved by system and must not be set)
-  n ! Normal (i.e. no other attributes set)
-  t - Temporary
-  p ! Sparse file
-  l ! Symbolic link / Junction / Mount point / Reparse point
-  c - Compressed (flag changeable with directories only)
-  o - Offline
-  i - Not content indexed (shown as 'N' in Explorer in Windows Vista)
-  e ! Encrypted
-  V ! Integrity (for ReFS volume only; attribute not shown in Explorer)
-  X ! No scrub (for ReFS volume only; attribute not shown in Explorer)
-  P ! Pinned (OneDrive "always available files")
-  U ! Unpinned (OneDrive "online-only files")
-  M ! Recall on data access
-  B ! SMR blob / Strictly sequential
 USAGE
+  all="0${both}1${onlyfat}2${onlyntfs}"
+
+  ii=0
+  while [ $ii -lt ${#all} ]
+  do
+    letter=${all:$ii:1}
+    case "$letter" in
+    0|1|2) echo "${attributes[$letter]}" ;;
+    *)
+      echo "${attributes[$letter]}" | {
+        lno=0
+        while read line
+        do
+          if [ $lno -eq 0 ]; then
+            echo "  $letter $line"
+          else
+            echo "      $line"
+          fi
+
+          (( lno = lno + 1 ))
+        done
+      }
+      ;;
+    esac
+    
+    (( ii = ii + 1 ))
+  done
 }
+
+file_system_type() {
+  rpth="$(realpath "$1")"
+  fstype=$(df -PTh "$rpth" | grep -v '^Filesystem' | { read one two etc; echo $two; })
+  echo "${fstype,,}"
+}
+
 # Order of attribute letters in "%~a1" output: "drahscotl-x"
 # ('x' = No scrub. One slot is unknown; tell me if you discovered what it is.)
 # Order of attribute letters in 'attrib' output: "A  SHR OI VX P U  "
@@ -140,102 +194,206 @@ USAGE
 # attribute of the file while 'attrib' can show it, ignoring the DEVICE
 # attribute bit.
 
+debug=
 while [ "$#" -ge 1 ]; do
-    case "$1" in
-        [+-][Rr]) attr_r=${1%[Rr]} attr_mode=edit ;;
-        [+-][Hh]) attr_h=${1%[Hh]} attr_mode=edit ;;
-        [+-][Ss]) attr_s=${1%[Ss]} attr_mode=edit ;;
-        [+-][Aa]) attr_a=${1%[Aa]} attr_mode=edit ;;
-        [+-][Tt]) attr_t=${1%[Tt]} attr_mode=edit ;;
-        [+-][Cc]) attr_c=${1%[Cc]} attr_mode=edit ;;
-        [+-][Oo]) attr_o=${1%[Oo]} attr_mode=edit ;;
-        [+-][Ii]) attr_i=${1%[Ii]} attr_mode=edit ;;
-        -L|--no-dereference)
-            # This was the '/L' option in 'attrib' in Windows, however '/' is
-            # path separator in Unix so we implement as '-L' instead.
-            # {get,set}fattr supports '-h' for '--no-dereference' but this
-            # option can be confusing in this script.
-            attr_no_deref=--no-dereference
-            ;;
-        -?|--help)
-            show_usage
-            exit 0
-            ;;
-        *) break ;;
-    esac
-    shift
+  case "$1" in
+    [+-][Rr]) attr_r=${1%[Rr]} attr_mode=edit ;;
+    [+-][Hh]) attr_h=${1%[Hh]} attr_mode=edit ;;
+    [+-][Ss]) attr_s=${1%[Ss]} attr_mode=edit ;;
+    [+-][Aa]) attr_a=${1%[Aa]} attr_mode=edit ;;
+    [+-][Tt]) attr_t=${1%[Tt]} attr_mode=edit ;;
+    [+-][Cc]) attr_c=${1%[Cc]} attr_mode=edit ;;
+    [+-][Oo]) attr_o=${1%[Oo]} attr_mode=edit ;;
+    [+-][Ii]) attr_i=${1%[Ii]} attr_mode=edit ;;
+    -L|--no-dereference)
+      # This was the '/L' option in 'attrib' in Windows, however '/' is
+      # path separator in Unix so we implement as '-L' instead.
+      # {get,set}fattr supports '-h' for '--no-dereference' but this
+      # option can be confusing in this script.
+      attr_no_deref=--no-dereference
+      ;;
+    --show|-show) attr_mode=show ;;
+    --detail|-detail) attr_mode=detail ;;
+    --debug|-debug) debug=yes; attr_show_hex=yes ;;
+    -?|--help|-help)
+      show_usage
+      exit 0
+      ;;
+    *) break ;;
+  esac
+  shift
 done
 
 # Silently ignore the "--" option.
 [ "X$1" = "X--" ] && shift
 
 if [ "$#" -le 0 ]; then
-    if [ "$attr_mode" = show ]; then
-        # Default to list attributes of all files in current directory.
-        exec "$0" $attr_no_deref *
-    else
-        echo "$0: no file specified" >&2
-        exit 1
-    fi
+  if [ "$attr_mode" = show ]; then
+    # Default to list attributes of all files in current directory.
+    exec "$0" $attr_no_deref *
+  else
+    echo "$0: no file specified" >&2
+    exit 1
+  fi
 fi
 
 attr_exit_status=0
 
 # Process each file
 for f in "$@"; do
+  fstype=$(file_system_type "$f")
+  case "$fstype" in
+  *ntfs*)
     # getfattr bug: If argument is symlink to directory and without '-h',
     # attributes of *directory contents* will be shown as well as target
     # directory itself. (setfattr is not affected and so is safe.)
     if getfattr $attr_no_deref -e hex -n system.ntfs_attrib_be "$f" >/dev/null; then
-        :
+      :
     else
-        attr_exit_status=$?
-        continue
+      attr_exit_status=$?
+      continue
     fi
+
     attr_hex=$(getfattr $attr_no_deref -e hex -n system.ntfs_attrib_be "$f" 2>/dev/null |
-        sed '/system\.ntfs_attrib_be=/ { s/^[^0]*0[Xx]/0x/; q }; d')
-    [ "$attr_show_hex" ] && printf '%s ' "$attr_hex"
+      sed '/system\.ntfs_attrib_be=/ { s/^[^0]*0[Xx]/0x/; q }; d')
+
+    [ "$attr_show_hex" ] && printf 'getfattr system.ntfs_attrib_be %s for %s\n' "$attr_hex" "$f"
+
     if [ "$attr_mode" = show ]; then
-        attr_mask=0x1
-        # Attribute that are reserved and never have letters:
-        # FILE_ATTRIBUTE_VIRTUAL (0x10000)
-        # FILE_ATTRIBUTE_RECALL_ON_OPEN (0x40000)
-        # 0x200000
-        # 0x800000 to 0x10000000
-        # 0x40000000 to 0x80000000
-        for i in \
-            r h s v d a x n t p l c o i e V + X + P U + M + + + + + + B; do
-            if [ $(($attr_hex & $attr_mask)) -gt 0 ]; then
-                printf '%c' "$i"
-            else
-                printf '-'
-            fi
-            attr_mask=$(($attr_mask*2))
-        done
-        printf ' %s\n' "$f"
-    else
-        [ "$attr_r" = "+" ] && attr_hex=$(($attr_hex |     0x1))
-        [ "$attr_r" = "-" ] && attr_hex=$(($attr_hex &    ~0x1))
-        [ "$attr_h" = "+" ] && attr_hex=$(($attr_hex |     0x2))
-        [ "$attr_h" = "-" ] && attr_hex=$(($attr_hex &    ~0x2))
-        [ "$attr_s" = "+" ] && attr_hex=$(($attr_hex |     0x4))
-        [ "$attr_s" = "-" ] && attr_hex=$(($attr_hex &    ~0x4))
-        [ "$attr_a" = "+" ] && attr_hex=$(($attr_hex |    0x20))
-        [ "$attr_a" = "-" ] && attr_hex=$(($attr_hex &   ~0x20))
-        [ "$attr_t" = "+" ] && attr_hex=$(($attr_hex |   0x100))
-        [ "$attr_t" = "-" ] && attr_hex=$(($attr_hex &  ~0x100))
-        if [ -d "$f" ]; then
-            [ "$attr_c" = "+" ] && attr_hex=$(($attr_hex |  0x800))
-            [ "$attr_c" = "-" ] && attr_hex=$(($attr_hex & ~0x800))
+      attr_mask=0x1
+      # Attribute that are reserved and never have letters:
+      # FILE_ATTRIBUTE_VIRTUAL (0x10000)
+      # FILE_ATTRIBUTE_RECALL_ON_OPEN (0x40000)
+      # 0x200000
+      # 0x800000 to 0x10000000
+      # 0x40000000 to 0x80000000
+      for i in \
+        r h s v d a x n t p l c o i e V + X + P U + M + + + + + + B; do
+        if [ $(($attr_hex & $attr_mask)) -gt 0 ]; then
+          printf '%c' "$i"
+        else
+          printf '-'
         fi
-        [ "$attr_o" = "+" ] && attr_hex=$(($attr_hex |  0x1000))
-        [ "$attr_o" = "-" ] && attr_hex=$(($attr_hex & ~0x1000))
-        [ "$attr_i" = "+" ] && attr_hex=$(($attr_hex |  0x2000))
-        [ "$attr_i" = "-" ] && attr_hex=$(($attr_hex & ~0x2000))
-        attr_hex=$(printf '%#010x' "$attr_hex")
-        setfattr $attr_no_deref -v "$attr_hex" -n system.ntfs_attrib_be "$f" ||
-            attr_exit_status=$?
+        attr_mask=$(($attr_mask*2))
+      done
+      printf ' %s\n' "$f"
+    elif [ "$attr_mode" = detail ]; then
+      attr_mask=0x1
+      echo "$f -"
+      for letter in \
+        r h s v d a x n t p l c o i e V + X + P U + M + + + + + + B; do
+        if [ $(($attr_hex & $attr_mask)) -gt 0 ]; then
+          printf '%c' "$i"
+          echo "${attributes[$letter]}" | {
+            lno=0
+            while read line
+            do
+              if [ $lno -eq 0 ]; then
+                echo "  $letter $line"
+              else
+                echo "      $line"
+              fi
+
+              (( lno = lno + 1 ))
+            done
+          }
+        fi
+          attr_mask=$(($attr_mask*2))
+      done
+    else
+      [ "$attr_r" = "+" ] && attr_hex=$(($attr_hex |     0x1))
+      [ "$attr_r" = "-" ] && attr_hex=$(($attr_hex &    ~0x1))
+      [ "$attr_h" = "+" ] && attr_hex=$(($attr_hex |     0x2))
+      [ "$attr_h" = "-" ] && attr_hex=$(($attr_hex &    ~0x2))
+      [ "$attr_s" = "+" ] && attr_hex=$(($attr_hex |     0x4))
+      [ "$attr_s" = "-" ] && attr_hex=$(($attr_hex &    ~0x4))
+      [ "$attr_a" = "+" ] && attr_hex=$(($attr_hex |    0x20))
+      [ "$attr_a" = "-" ] && attr_hex=$(($attr_hex &   ~0x20))
+      [ "$attr_t" = "+" ] && attr_hex=$(($attr_hex |   0x100))
+      [ "$attr_t" = "-" ] && attr_hex=$(($attr_hex &  ~0x100))
+      if [ -d "$f" ]; then
+        [ "$attr_c" = "+" ] && attr_hex=$(($attr_hex |  0x800))
+        [ "$attr_c" = "-" ] && attr_hex=$(($attr_hex & ~0x800))
+      elif [ "$attr_c" = "+" -o "$attr_c" = "-" ]; then
+        echo "${attr_c}c is invalid for a non-directory" >&2
+      fi
+      [ "$attr_o" = "+" ] && attr_hex=$(($attr_hex |  0x1000))
+      [ "$attr_o" = "-" ] && attr_hex=$(($attr_hex & ~0x1000))
+      [ "$attr_i" = "+" ] && attr_hex=$(($attr_hex |  0x2000))
+      [ "$attr_i" = "-" ] && attr_hex=$(($attr_hex & ~0x2000))
+      attr_hex=$(printf '%#010x' "$attr_hex")
+
+      [ "$attr_show_hex" ] && printf 'setfattr system.ntfs_attrib_be %s for %s\n' "$attr_hex" "$f"
+
+      [ "$debug" ] && echo "setfattr $attr_no_deref -v \"$attr_hex\" -n system.ntfs_attrib_be \"$f\""
+
+      setfattr $attr_no_deref -v "$attr_hex" -n system.ntfs_attrib_be "$f" ||
+        attr_exit_status=$?
     fi
+    ;;
+
+  *fat*)
+    if [ "$attr_mode" != show -a "$attr_mode" != detail ]; then
+      attrs=
+      for letter in r h a s
+      do
+        eval 'attr="$attr_'$letter'"'
+        [ ".$attr" = ".+" -o ".$attr" = ".-" ] && attrs="$attrs${attrs:+ }${attr}$letter"
+      done
+
+      for letter in t c o i
+      do
+        eval 'attr="$attr_'$letter'"'
+        if [ ".$attr" = ".+" -o ".$attr" = ".-" ]; then
+          if [ "$attrs" ]; then
+            echo "skipping $attr$letter (${attributes[$letter]}), is not valid for a $fstype filesystem $f"
+          else
+            echo "$attr$letter (${attributes[$letter]}) is not valid for a $fstype filesystem $f"
+          fi
+        fi
+      done
+    fi
+
+    if [ "$attr_mode" = show ]; then
+      fatattr "$f"
+    elif [ "$attr_mode" = detail ]; then
+      echo "$f -"
+      fatattr "$f" | cut -c1-10 | while read line
+      do
+        for letter in r h s v d a
+        do
+          case "$line" in
+          *${letter}*)
+            echo "${attributes[$letter]}" | {
+              lno=0
+              while read line
+              do
+                if [ $lno -eq 0 ]; then
+                  echo "  $letter $line"
+                else
+                  echo "      $line"
+                fi
+
+                (( lno = lno + 1 ))
+              done
+            }
+            ;;
+          esac
+        done
+      done
+    else
+      if [ "$attrs" ]; then
+        echo "no attribute changes specified for $f"
+      else
+        [ "$debug" ] && echo "fatattr $attrs \"$f\""
+        # fatattr ${attr_r}${attr_r:+r} ${attr_h}${attr_h:+h} ${attr_a}${attr_a:+a} ${attr_s}${attr_s:+s} "$f"
+        fatattr $attrs "$f"
+      fi
+    fi
+    ;;
+
+  *) echo filesystem type $fstype for $f not handled >&2 ;;
+  esac
 done
 
 exit $attr_exit_status
